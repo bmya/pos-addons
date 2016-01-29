@@ -32,7 +32,7 @@ openerp.pos_multi_session = function(instance){
                 order.ms_remove_order();
             });
             this.get('orders').bind('add', function(order,_unused_,options){ 
-                if (!self.ms_syncing_in_progress){
+                if (!self.ms_syncing_in_progress && self.multi_session){
                     self.multi_session.sync_sequence_number();
                 }
             });
@@ -72,22 +72,30 @@ openerp.pos_multi_session = function(instance){
 
         ms_on_update: function(message){
             this.ms_syncing_in_progress = true; // don't broadcast updates made from this message
-            console.log('on_update', message)
-            var action = message.action;
-            var data = message.data || {}
-            var order = false;
-            if (data.uid){
-                order = this.get('orders').find(function(order){
-                    return order.uid == data.uid;
-                })
-            }
-            if (order && action == 'remove_order'){
-                order.destroy({'reason': 'abandon'})
-            } else if (action == 'update') {
-                this.ms_do_update(order, data);
+            var error = false;
+            try{
+                console.log('on_update', message)
+                var action = message.action;
+                var data = message.data || {}
+                var order = false;
+                if (data.uid){
+                    order = this.get('orders').find(function(order){
+                                return order.uid == data.uid;
+                            })
+                }
+                if (order && action == 'remove_order'){
+                    order.destroy({'reason': 'abandon'})
+                } else if (action == 'update') {
+                    this.ms_do_update(order, data);
+                }
+            }catch(err){
+                error = err;
+                console.error(err);
             }
             this.ms_syncing_in_progress = false;
-
+            if (error){
+                throw(error)
+            }
 
             if (action == 'sync_sequence_number'){
                 this.ms_do_sync_sequence_number(data);
@@ -135,6 +143,7 @@ openerp.pos_multi_session = function(instance){
             var pos = this;
             var sequence_number = data.sequence_number;
             if (!order){
+                var create_new_order = pos.config.multi_session_accept_incoming_orders || !(data.ms_info && data.ms_info.created.user.id != pos.ms_my_info().user.id)
                 if (sequence_number == this.pos_session.sequence_number){
                     //ok
                 } else if (sequence_number > this.pos_session.sequence_number){
@@ -143,7 +152,11 @@ openerp.pos_multi_session = function(instance){
                 } else if (sequence_number < this.pos_session.sequence_number){
                     // another pos has obsolete sequence_number
                     pos.multi_session.sync_sequence_number();
-                    this.pos_session.sequence_number--; // decrease temporarily, because it is increased right after creating new order
+                    if (create_new_order)
+                        this.pos_session.sequence_number--; // decrease temporarily, because it is increased right after creating new order
+                }
+                if (!create_new_order){
+                    return;
                 }
                 order = this.ms_create_order({ms_info:data.ms_info})
                 order.uid = data.uid;
@@ -199,9 +212,9 @@ openerp.pos_multi_session = function(instance){
             options = options || {}
             OrderSuper.prototype.initialize.apply(this, arguments);
             this.ms_info = {}
-            if (options.ms_info){
+            if (!_.isEmpty(options.ms_info)){
                 this.ms_info = options.ms_info;
-            } else if (this.ms_check()){
+            } else if (this.pos.multi_session){
                 this.ms_info['created'] = this.pos.ms_my_info();
             }
             this.ms_replace_empty_order = is_first_order;
@@ -344,7 +357,14 @@ openerp.pos_multi_session = function(instance){
             var message = notification[1];
 
             if(Array.isArray(channel) && channel[1] === 'pos.multi_session'){
-                this.pos.ms_on_update(message)
+                try{
+                    this.pos.ms_on_update(message)
+                }catch(err){
+                    this.pos.pos_widget.screen_selector.show_popup('error',{
+                        message: _t('Error'),
+                        comment: err,
+                    })
+                }
             }
             this.pos.db.save('bus_last', this.bus.last)
         }
